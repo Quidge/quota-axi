@@ -6,9 +6,9 @@ import type { ProviderQuota } from "../../src/types.js";
 
 /**
  * A CLI-only Cursor machine has no editor `state.vscdb` at all, so these cases
- * cover the quota refresh that has to run on the `cursor-agent` Keychain token
- * alone. The token value is a stand-in string here so every case can also
- * assert that it never reaches the report.
+ * cover quota refresh from the platform `cursor-agent` credential store alone.
+ * The token value is a stand-in string here so every case can also assert that
+ * it never reaches the report.
  */
 const CLI_TOKEN = "cli-keychain-token-stand-in";
 const EDITOR_TOKEN = "editor-token-stand-in";

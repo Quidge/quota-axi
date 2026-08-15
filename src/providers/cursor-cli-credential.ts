@@ -17,11 +17,12 @@ import type { AuthSourceReport, ProviderOptions } from "../types.js";
  * path uses the same `--allow-keychain-prompt` gate as the Claude keychain
  * source; the Linux auth file is read directly without any refresh behavior.
  *
- * Access-token refresh is intentionally not implemented: the sibling
- * `cursor-refresh-token` item is never read, because quota-axi does not mutate
- * provider state and has no first-party refresh contract to rely on. An expired
- * access token therefore surfaces as `Cursor sign-in required`, whose remedy is
- * running `cursor-agent login` again.
+ * Access-token refresh is intentionally not implemented: neither the Linux
+ * `refreshToken` field nor the macOS `cursor-refresh-token` item is read,
+ * because quota-axi does not mutate provider state and has no first-party
+ * refresh contract to rely on. A rejected access token can therefore use an
+ * eligible stale snapshot or report that authentication is required; recovery
+ * is running `cursor-agent login` again.
  */
 export const CURSOR_CLI_SOURCE = "cli-keychain";
 export const CURSOR_CLI_AUTHFILE_SOURCE = "cli-authfile";
