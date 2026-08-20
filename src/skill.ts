@@ -3,8 +3,8 @@ import { DESCRIPTION, TOP_HELP } from "./cli.js";
 // Trigger string Claude Code (and other agents) match against to auto-load the skill.
 // Kept terse and outcome-focused so it fires on "check quota/rate limits" intents.
 export const SKILL_DESCRIPTION =
-  "Report local Claude, Codex, Cursor, GitHub Copilot, Grok, and Kimi quota windows via the quota-axi CLI - remaining " +
-  "effective usable runway, percentages, reset times, cycle-average pace vs the reset clock, and provider status read from local auth sources, " +
+  "Report local Claude, Codex, Cursor, GitHub Copilot, Grok, Kimi, Z.AI, and Antigravity quota windows via the quota-axi CLI - remaining " +
+  "effective usable runway, percentages, reset times, cycle-average pace vs the reset clock, a per-scope selection signal, and provider status read from local auth sources, " +
   "with no routing, provider mutation, or default ordering preference. Use before deciding whether it is safe " +
   "to keep spending a provider's quota, when the user asks about usage, rate limits, pace, or " +
   "remaining quota, or when comparing local provider headroom.";
@@ -24,12 +24,19 @@ export const HERMES_TAGS = [
   "copilot",
   "grok",
   "kimi",
+  "zai",
+  "agy",
+  "antigravity",
   "cli",
 ];
 export const HERMES_CATEGORY = "observability";
 
 function yamlDoubleQuote(value: string): string {
   return JSON.stringify(value);
+}
+
+function yamlStringList(values: string[], indent: string): string {
+  return values.map((value) => `${indent}- ${value}`).join("\n");
 }
 
 /**
@@ -48,7 +55,8 @@ user-invocable: false
 author: ${SKILL_AUTHOR}
 metadata:
   hermes:
-    tags: [${HERMES_TAGS.join(", ")}]
+    tags:
+${yamlStringList(HERMES_TAGS, "      ")}
     category: ${HERMES_CATEGORY}
 ---
 
@@ -61,9 +69,12 @@ You do not need quota-axi installed globally - invoke it with \`npx -y quota-axi
 quota-axi is data only: it never routes, recommends a provider, model, harness, credential, or
 route, proxies, intercepts, logs in, imports browser cookies, or mutates provider state. Default
 output has no ordering preference. The explicit \`models --sort runway\` comparator only orders
-quota evidence, preserves ties, and is never a recommendation. It reads local provider auth sources and calls
-first-party provider quota, usage, billing, entitlement, or read-only credential-liveness endpoints; it never launches the
-Claude, Cursor, Grok, Pi, or Kimi CLIs, so it cannot spend the quota it measures.
+quota evidence, preserves ties, and is never a recommendation. quota-axi additionally publishes one
+derived per-scope comparative selection signal, \`effectiveAvailability[].selection\`, as data
+computed from figures it already reports; it still ranks nothing and routes nowhere, and the
+consumer decides what to do with it. It reads local provider auth sources and calls
+first-party provider quota, usage, billing, entitlement, local loopback, or read-only credential-liveness endpoints; it never launches the
+Claude, Cursor, Grok, Pi, Kimi, opencode, or Antigravity/agy CLIs, so it cannot spend the quota it measures.
 
 ## When to use
 
@@ -74,7 +85,20 @@ or when comparing supported local provider headroom side by side.
 ## Workflow
 
 1. Run \`npx -y quota-axi\` for compact TOON output covering supported providers' quota windows.
-2. Scope to one provider with \`--provider claude\` or to a subset with \`--provider cursor,copilot,grok,kimi\`.
+   Default TOON has three decision-shaped blocks. \`quota[]\` has one fully populated row per
+   measurable scope: \`provider\`, \`scope\`, \`effectivePercentRemaining\`, \`spendPriority\`,
+   \`runway\`, \`confidence\`, \`limitedBy\`, and the binding window's \`resetsAt\`. Sparse
+   \`exhaustion[]\` adds \`usableRunwaySeconds\`, \`projectedExhaustedAt\`, and \`limitingWindowId\`
+   for the scopes with a finite exhaustion point only, joined back on \`provider\` + \`scope\`;
+   \`exhaustion[0]:\` means nothing is projected to run out. Sparse \`attention[]\` carries every
+   non-nominal fact as \`provider,scope,kind,detail,remedy\` - auth, staleness, state reasons,
+   rate limits, unresolved or untrusted windows, and unmeasurable bounds. Every requested provider
+   appears in \`quota[]\` or \`attention[]\` or both, never silently absent, and \`quota[]\` rows
+   are in provider-declaration order, never sorted by any metric: it is not a ranking. A scope with
+   unknown or stale headroom gets no \`quota[]\` row at all - read its \`attention[]\` row instead
+   of inferring a number. If that scope has finite runway, the attention detail preserves the
+   runway verdict and limiting window without creating an orphan \`exhaustion[]\` row.
+2. Scope to one provider with \`--provider claude\` or to a subset with \`--provider cursor,copilot,grok,kimi,zai,agy\`.
 3. Pass \`--json\` for the normalized machine-readable model instead of TOON. Read
    \`quotaSemantics.effectiveAvailability\` rather than treating a model window in isolation:
    account windows can bound every model, and \`boundedBy\` names every window included in the
@@ -83,17 +107,38 @@ or when comparing supported local provider headroom side by side.
    \`usableRunwaySeconds\`, \`projectedExhaustedAt\`, limiting window, and confidence; \`through_reset\`
    deliberately has no synthetic deadline; \`exhausted_now\` is zero runway; and \`unknown\` names
    unmeasurable bounds instead of inventing a conclusion. Read each window's \`pace\` (and the
-   effective scope's pace summary) for diagnostics. Default TOON omits raw numeric reserve;
-   \`--json\` and \`--full\` retain it. If relationship status is \`partial\` or \`unknown\`, do not infer
-   one. Stale reports keep raw windows for diagnostics, but effective availability, pace, and
-   runway are always unknown; never route from a stale raw percentage as though it were current
+   effective scope's pace summary) for diagnostics. Each scope also carries \`selection\`: when its
+   \`status\` is \`known\`, \`spendPriority\` is a signed, cycle-weighted scalar clamped to
+   [-100, 100] where positive means that scope's paid allowance is on track to reach reset unused,
+   \`0\` is exact utilization, and negative means it is overdrawn against the reset clock. It is
+   comparable across scopes, providers, and accounts, and it is advisory data only: it never
+   overrides \`runway\`, and quota-axi does not rank or route with it. When any bounding window has
+   no usable pace, the whole scope is \`status: "unknown"\` with \`unmeasurableWindowIds\` and no
+   scalar, and its TOON cell reads the literal \`unknown\` - never read an absent or \`unknown\`
+   scalar as healthy, and never read it as \`0\`, which means exact utilization. Default TOON omits
+   raw numeric reserve; \`--json\` and \`--full\` retain it. Every projection is cycle-average, so
+   there is no \`projectionBasis\` field: its absence means \`cycle_average\`. If relationship status
+   is \`partial\` or \`unknown\`, do not infer
+   one. Stale reports keep raw windows for diagnostics, but effective availability, pace, runway,
+   and selection are always unknown; never route from a stale raw percentage as though it were current
    headroom. Default output has no ordering preference. For a provider-native model evidence join,
    use \`npx -y quota-axi models --intelligence high --json\`. This catalog covers Claude, Codex,
    Grok, and Kimi only; its buckets are coarse editorial classifications, not scores. Its response
    includes catalog provenance and unmatched model windows. \`--sort runway\` is an explicit,
    documented quota-evidence comparator, not a provider, model, harness, credential, or route
    recommendation; inspect \`sort.tieGroups\` rather than treating equal evidence as a preference.
-4. Pass \`--full\` to include account identity, per-source attempts, and raw reserve diagnostics.
+4. Pass \`--full\` to include account identity, per-source attempts, raw reserve diagnostics, and
+   the derivation inputs default \`--json\` demotes. \`--full\` only ever adds, with no renames and
+   no re-nesting: a demoted field is simply absent until \`--full\`, in the same position under the
+   same name. Demoted are provider \`label\`/\`source\`, \`state.refreshedAt\`/\`sourcesTried\`,
+   window \`percentUsed\`/\`startsAt\`/\`windowSeconds\`, the window pace cycle-progress inputs
+   (\`timeRemainingPercent\`, \`elapsedPercent\`, \`cycleBasis\`, \`cycleSeconds\`,
+   \`projectedExhaustedAt\`, \`projectionConfidence\`), \`quotaSemantics.description\`, and scope
+   pace \`behindWindowIds\`/\`onPaceWindowIds\`. Everything you branch on stays in default
+   \`--json\`: state status/auth/reason/remedy fields, window \`pace.status\`, \`reason\`,
+   \`reservePercentPoints\` and \`burnMultiple\`, \`quotaSemantics.status\` and
+   \`unresolvedWindowIds\`, every scope's \`runway\` and \`selection\`, scope pace
+   \`aheadWindowIds\`/\`unknownWindowIds\`, and \`credits\` (never read \`credits\` as exhaustion).
 5. Run \`npx -y quota-axi auth\` to check local auth-source availability without printing
    secret values.
 6. On macOS, Claude and Cursor CLI Keychain value reads are skipped by default until the user
@@ -129,6 +174,17 @@ or when comparing supported local provider headroom side by side.
    Grok also reads that same Pi auth file for an independent \`xai\` OAuth or literal API-key
    entry and treats Grok as usable when either the Grok CLI session or Pi \`xai\` credential is
    valid.
+10. For Z.AI, quota-axi reads the Coding Plan API key from opencode's \`auth.json\`
+    (\`zai-coding-plan\`, plus \`zai\`/\`zhipu\` aliases). It reports the five-hour and weekly token
+    windows as one \`all_models\` bound and the monthly MCP tool window as a separate \`tools\`
+    scope; because the endpoint is undocumented, limits quota-axi cannot identify degrade to
+    untrusted \`unknown\` windows and turn the provider's semantics \`partial\` instead of
+    producing a confident wrong percentage.
+11. For Antigravity, quota-axi never launches \`agy\`. It discovers only the current user's
+    already-running Antigravity/\`agy\` processes and owned loopback ports, then reads vendor
+    \`remainingFraction\`/\`resetTime\` (or model config fallbacks). Window relationships are
+    unknown, so there is no combined remaining percentage. Pace stays unknown because the
+    snapshot has no honest burn-rate history.
 
 ## Usage
 
@@ -153,7 +209,9 @@ ${TOP_HELP.trimEnd()}
   empty quota.
   Claude local expiry metadata is advisory when an access token exists: the existing read-only
   usage request decides validity. Missing or invalid credentials without a usable token and HTTP
-  401/403 retire Claude cache; only transient failures may use bounded, reset-pruned stale data.
+  401/403 retire Claude cache; only transient failures may use bounded, reset-pruned stale data
+  from the same selected configuration context. Its cache-only context identifier is opaque, and
+  legacy context-less Claude snapshots are not reused.
   Claude and Cursor CLI Keychain access markers live alongside it, use hashed account scope,
   and contain no credential values or raw account identity. The Claude marker is also
   profile-scoped.

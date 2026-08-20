@@ -1,6 +1,10 @@
 import { describe, expect, it } from "vitest";
 import { withQuotaSemantics } from "../src/interpretation.js";
-import type { ProviderQuota, QuotaWindow } from "../src/types.js";
+import {
+  SELECTION_SCALAR_KEY,
+  type ProviderQuota,
+  type QuotaWindow,
+} from "../src/types.js";
 
 const GENERATED_AT = "2026-07-15T12:00:00.000Z";
 const WEEK_SECONDS = 604_800;
@@ -41,6 +45,36 @@ function weeklyResetsAt(elapsedFraction: number): string {
   ).toISOString();
 }
 
+function offsetFromGeneratedAt(seconds: number): string {
+  return new Date(Date.parse(GENERATED_AT) + seconds * 1000).toISOString();
+}
+
+const MONTH_SECONDS = 30 * 24 * 60 * 60;
+
+/** Halfway through a five-hour cycle with 40% of the token budget left. */
+function zaiSessionWindow(): QuotaWindow {
+  return window("five_hour", "session", 40, {
+    windowSeconds: 18_000,
+    resetsAt: offsetFromGeneratedAt(9_000),
+  });
+}
+
+/** Halfway through the weekly cycle with 30% of the token budget left. */
+function zaiWeeklyWindow(): QuotaWindow {
+  return window("weekly", "weekly", 30, {
+    windowSeconds: WEEK_SECONDS,
+    resetsAt: offsetFromGeneratedAt(WEEK_SECONDS / 2),
+  });
+}
+
+/** A quarter into the MCP month with only 10% of the tool budget left. */
+function zaiToolWindow(): QuotaWindow {
+  return window("mcp_month", "monthly", 10, {
+    startsAt: offsetFromGeneratedAt(-MONTH_SECONDS * 0.25),
+    resetsAt: offsetFromGeneratedAt(MONTH_SECONDS * 0.75),
+  });
+}
+
 describe("quota semantics", () => {
   it("keeps every stale provider's effective availability unknown", () => {
     const cases: Array<[ProviderQuota["provider"], QuotaWindow[]]> = [
@@ -48,6 +82,8 @@ describe("quota semantics", () => {
       ["codex", [window("weekly", "weekly", 38)]],
       ["grok", [window("credits", "credits", 44)]],
       ["kimi", [window("weekly", "weekly", 59)]],
+      ["zai", [window("weekly", "weekly", 42)]],
+      ["agy", [window("gemini_weekly", "weekly", 98)]],
       ["cursor", [window("included_usage", "monthly", 72)]],
       ["copilot", [window("premium_interactions", "monthly", 81)]],
     ];
@@ -232,7 +268,6 @@ describe("quota semantics", () => {
         limitingWindowId: "model:fable",
         usableRunwaySeconds: 50_400,
         projectionConfidence: "established",
-        projectionBasis: "cycle_average",
       },
     });
   });
@@ -328,10 +363,107 @@ describe("quota semantics", () => {
             status: "unknown",
             unmeasurableWindowIds: ["weekly", "limit:2"],
           },
+          selection: {
+            status: "unknown",
+            unmeasurableWindowIds: ["weekly", "limit:2"],
+          },
         },
       ],
       unresolvedWindowIds: ["limit:2"],
     });
+  });
+
+  it("reports Z.AI token and tool headroom as separate resources", () => {
+    const result = withQuotaSemantics(
+      provider("zai", [zaiSessionWindow(), zaiWeeklyWindow(), zaiToolWindow()]),
+      GENERATED_AT,
+    );
+
+    expect(result.quotaSemantics?.status).toBe("known");
+    expect(result.quotaSemantics?.effectiveAvailability).toEqual([
+      expect.objectContaining({
+        scope: "all_models",
+        status: "known",
+        effectivePercentRemaining: 30,
+        boundedBy: ["five_hour", "weekly"],
+        limitingWindowIds: ["weekly"],
+        pace: expect.objectContaining({
+          status: "ahead",
+          aheadWindowIds: ["five_hour", "weekly"],
+          worstReserveWindowId: "weekly",
+          worstReservePercentPoints: -20,
+        }),
+      }),
+      expect.objectContaining({
+        scope: "tools",
+        status: "known",
+        effectivePercentRemaining: 10,
+        boundedBy: ["mcp_month"],
+        limitingWindowIds: ["mcp_month"],
+        pace: expect.objectContaining({
+          status: "ahead",
+          worstReserveWindowId: "mcp_month",
+          worstReservePercentPoints: -65,
+        }),
+      }),
+    ]);
+  });
+
+  it("keeps the Z.AI tool window out of the all-models bound when limits are unresolved", () => {
+    const zai = provider("zai", [
+      zaiSessionWindow(),
+      zaiWeeklyWindow(),
+      zaiToolWindow(),
+      window("limit:3", "unknown", 50),
+    ]);
+    zai.state.untrustedWindowIds = ["limit:3", "limit:4"];
+
+    const result = withQuotaSemantics(zai, GENERATED_AT);
+
+    expect(result.quotaSemantics?.status).toBe("partial");
+    expect(result.quotaSemantics?.unresolvedWindowIds).toEqual([
+      "limit:3",
+      "limit:4",
+    ]);
+    expect(result.quotaSemantics?.effectiveAvailability).toEqual([
+      {
+        scope: "all_models",
+        status: "unknown",
+        boundedBy: ["five_hour", "weekly"],
+        pace: expect.objectContaining({
+          status: "ahead",
+          aheadWindowIds: ["five_hour", "weekly"],
+          worstReserveWindowId: "weekly",
+          worstReservePercentPoints: -20,
+        }),
+        runway: {
+          status: "unknown",
+          unmeasurableWindowIds: ["five_hour", "weekly", "limit:3", "limit:4"],
+        },
+        selection: {
+          status: "unknown",
+          unmeasurableWindowIds: ["five_hour", "weekly", "limit:3", "limit:4"],
+        },
+      },
+      {
+        scope: "tools",
+        status: "unknown",
+        boundedBy: ["mcp_month"],
+        pace: expect.objectContaining({
+          status: "ahead",
+          worstReserveWindowId: "mcp_month",
+          worstReservePercentPoints: -65,
+        }),
+        runway: {
+          status: "unknown",
+          unmeasurableWindowIds: ["mcp_month", "limit:3", "limit:4"],
+        },
+        selection: {
+          status: "unknown",
+          unmeasurableWindowIds: ["mcp_month", "limit:3", "limit:4"],
+        },
+      },
+    ]);
   });
 
   it("applies Grok shared credits to product windows", () => {
@@ -363,6 +495,19 @@ describe("quota semantics", () => {
       status: "unknown",
       effectiveAvailability: [],
       unresolvedWindowIds: ["premium_interactions"],
+    });
+
+    const agy = withQuotaSemantics(
+      provider("agy", [
+        window("gemini_5h", "session", 100),
+        window("gemini_weekly", "weekly", 98),
+      ]),
+      GENERATED_AT,
+    );
+    expect(agy.quotaSemantics).toMatchObject({
+      status: "unknown",
+      effectiveAvailability: [],
+      unresolvedWindowIds: ["gemini_5h", "gemini_weekly"],
     });
 
     const kimi = withQuotaSemantics(
@@ -532,5 +677,126 @@ describe("quota semantics", () => {
     expect(result.quotaSemantics?.description).not.toMatch(
       /recommend|prefer|switch|route/i,
     );
+  });
+});
+
+describe("per-scope selection signal", () => {
+  const HOUR_SECONDS = 3_600;
+  const FIVE_HOURS_SECONDS = 18_000;
+  const DAY_SECONDS = 86_400;
+
+  function after(seconds: number): string {
+    return new Date(Date.parse(GENERATED_AT) + seconds * 1000).toISOString();
+  }
+
+  function before(seconds: number): string {
+    return after(-seconds);
+  }
+
+  function scopes(provider: ProviderQuota): Map<string, number | undefined> {
+    const semantics = withQuotaSemantics(provider, GENERATED_AT).quotaSemantics;
+    return new Map(
+      (semantics?.effectiveAvailability ?? []).map((availability) => [
+        availability.scope,
+        availability.selection?.[SELECTION_SCALAR_KEY],
+      ]),
+    );
+  }
+
+  // Claude is under-consuming both account windows; Cursor is tracking its
+  // billing cycle almost exactly; Codex is nearly empty and well ahead of pace.
+  const claude = provider("claude", [
+    window("five_hour", "session", 90, {
+      windowSeconds: FIVE_HOURS_SECONDS,
+      resetsAt: after(3 * HOUR_SECONDS),
+    }),
+    window("seven_day", "weekly", 80, {
+      windowSeconds: WEEK_SECONDS,
+      resetsAt: after(5 * DAY_SECONDS),
+    }),
+    window("model:fable", "model", 95, {
+      windowSeconds: WEEK_SECONDS,
+      resetsAt: after(5 * DAY_SECONDS),
+    }),
+  ]);
+  const cursor = provider("cursor", [
+    window("included_usage", "monthly", 35, {
+      startsAt: before(20 * DAY_SECONDS),
+      resetsAt: after(10 * DAY_SECONDS),
+    }),
+  ]);
+  const codex = provider("codex", [
+    window("five_hour", "session", 5, {
+      windowSeconds: FIVE_HOURS_SECONDS,
+      resetsAt: after(4 * HOUR_SECONDS),
+    }),
+    window("weekly", "weekly", 10, {
+      windowSeconds: WEEK_SECONDS,
+      resetsAt: after(6 * DAY_SECONDS),
+    }),
+  ]);
+
+  it("scores an under-consuming subscription above a fully-utilized one", () => {
+    const claudeAllModels = scopes(claude).get("all_models");
+    const cursorAllModels = scopes(cursor).get("all_models");
+
+    expect(claudeAllModels).toBeCloseTo(0.444, 3);
+    expect(cursorAllModels).toBeCloseTo(0.075, 3);
+    expect(claudeAllModels!).toBeGreaterThan(0);
+    expect(claudeAllModels!).toBeGreaterThan(cursorAllModels!);
+  });
+
+  it("scores the least-consumed model scope highest within a provider", () => {
+    const claudeScopes = scopes(claude);
+    const fable = claudeScopes.get("model:fable");
+
+    expect(fable).toBeCloseTo(0.794, 3);
+    for (const [scope, value] of claudeScopes) {
+      if (scope === "model:fable") continue;
+      expect(fable!).toBeGreaterThan(value!);
+    }
+  });
+
+  it("scores a near-empty provider that is ahead of pace negative", () => {
+    const codexAllModels = scopes(codex).get("all_models");
+
+    expect(codexAllModels).toBeCloseTo(-6.14, 2);
+    expect(codexAllModels!).toBeLessThan(0);
+    expect(codexAllModels!).toBeLessThan(scopes(cursor).get("all_models")!);
+  });
+
+  it("keeps every stale scope's selection unknown with its bounds named", () => {
+    const stale: ProviderQuota = {
+      ...claude,
+      state: {
+        status: "stale",
+        stale: true,
+        refreshedAt: "2026-07-06T18:10:00Z",
+        sourcesTried: ["api"],
+      },
+    };
+
+    for (const availability of withQuotaSemantics(stale, GENERATED_AT)
+      .quotaSemantics!.effectiveAvailability) {
+      expect(availability.selection).toEqual({
+        status: "unknown",
+        unmeasurableWindowIds: availability.boundedBy,
+      });
+    }
+  });
+
+  it("makes a scope unmeasurable when a bounding window has no known pace", () => {
+    const missingCycle = provider("claude", [
+      window("five_hour", "session", 90, {
+        windowSeconds: FIVE_HOURS_SECONDS,
+        resetsAt: after(3 * HOUR_SECONDS),
+      }),
+      window("seven_day", "weekly", 80),
+    ]);
+
+    expect(
+      withQuotaSemantics(missingCycle, GENERATED_AT).quotaSemantics
+        ?.effectiveAvailability[0]?.selection,
+    ).toEqual({ status: "unknown", unmeasurableWindowIds: ["seven_day"] });
   });
 });
